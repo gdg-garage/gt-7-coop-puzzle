@@ -55,16 +55,18 @@
             margin-bottom: 2rem;
             background: linear-gradient(to right, #60a5fa, #10b981);
             -webkit-background-clip: text;
+            background-clip: text;
             -webkit-text-fill-color: transparent;
             font-weight: 600;
         }
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             gap: 1.5rem;
             margin-bottom: 3rem;
             place-items: center;
+            max-width: 100%;
         }
 
         @media (max-width: 600px) {
@@ -240,6 +242,37 @@
             border-color: var(--primary);
             color: var(--primary);
         }
+
+        #cipher-display {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: var(--glass);
+            border: 1px solid var(--glass-border);
+            border-radius: 1rem;
+            font-family: monospace;
+            font-size: 1.25rem;
+            color: var(--primary);
+            display: none;
+            word-break: break-all;
+            max-width: 100%;
+        }
+
+        #cipher-display.show {
+            display: block;
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
     </style>
 </head>
 
@@ -273,6 +306,8 @@
 
         <button class="trigger-btn" id="trigger-btn">join</button>
 
+        <div id="cipher-display"></div>
+
 
     </div>
 
@@ -282,6 +317,7 @@
         const chunkGrid = document.getElementById('chunk-grid');
         const triggerBtn = document.getElementById('trigger-btn');
         const notification = document.getElementById('notification');
+        const cipherDisplay = document.getElementById('cipher-display');
 
         let socket;
 
@@ -295,7 +331,7 @@
 
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            const wsUrl = `${protocol}//localhost:8080/ws`;
 
             socket = new WebSocket(wsUrl);
 
@@ -319,40 +355,61 @@
                     updateUI(data.chunks);
                 }
 
-                if (data.error) {
-                    showNotification(data.error);
-                }
-
-                if (data.unlocked) {
-                    showNotification("UNLOCKED: TRUE", "success");
-                    console.log("UNLOCKED: TRUE");
-                }
-
                 if (data.already_joined) {
-                    triggerBtn.disabled = true;
-                    triggerBtn.innerText = 'joined';
+                    if (!data.error) {
+                        triggerBtn.disabled = true;
+                        triggerBtn.innerText = 'joined';
+                    }
                 }
 
                 if (data.can_rejoin) {
                     triggerBtn.disabled = false;
                     triggerBtn.innerText = 'join';
+                    cipherDisplay.classList.remove('show');
+                }
+
+                if (data.error) {
+                    showNotification(data.error);
+                }
+
+                if (data.cipher_chunk) {
+                    cipherDisplay.innerText = data.cipher_chunk;
+                    cipherDisplay.classList.add('show');
                 }
             };
         }
 
         function updateUI(chunks) {
-            chunks.forEach(chunk => {
-                const chunkEl = document.getElementById(`chunk-${chunk.id}`);
-                if (chunkEl) {
-                    const timerEl = chunkEl.querySelector('.timer');
-                    timerEl.innerText = chunk.timer.toString().padStart(2, '0');
+            const activeIds = new Set(chunks.map(c => `chunk-${c.id}`));
 
-                    chunkEl.classList.remove('active', 'waiting');
-                    if (chunk.status === 'green') {
-                        chunkEl.classList.add('active');
-                    } else if (chunk.status === 'orange') {
-                        chunkEl.classList.add('waiting');
-                    }
+            // Remove elements no longer in the server's chunk list
+            chunkGrid.querySelectorAll('.chunk').forEach(el => {
+                if (!activeIds.has(el.id)) {
+                    el.remove();
+                }
+            });
+
+            chunks.forEach(chunk => {
+                let chunkEl = document.getElementById(`chunk-${chunk.id}`);
+                if (!chunkEl) {
+                    chunkEl = document.createElement('div');
+                    chunkEl.id = `chunk-${chunk.id}`;
+                    chunkEl.className = 'chunk';
+                    chunkEl.innerHTML = `
+                        <span class="chunk-id">${chunk.id}</span>
+                        <span class="timer">00</span>
+                        <div class="status-dot"></div>
+                    `;
+                    chunkGrid.appendChild(chunkEl);
+                }
+                const timerEl = chunkEl.querySelector('.timer');
+                timerEl.innerText = (chunk.timer || 0).toString().padStart(2, '0');
+
+                chunkEl.classList.remove('active', 'waiting');
+                if (chunk.status === 'green') {
+                    chunkEl.classList.add('active');
+                } else if (chunk.status === 'orange') {
+                    chunkEl.classList.add('waiting');
                 }
             });
         }
