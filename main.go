@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +104,12 @@ type ServerState struct {
 
 var state *ServerState
 
-var clients = make(map[*websocket.Conn]string)
+type Client struct {
+	ID     string
+	Joined bool
+}
+
+var clients = make(map[*websocket.Conn]*Client)
 var clientsMu sync.Mutex
 
 func getClientID(r *http.Request) string {
@@ -138,10 +144,10 @@ func broadcast(msg interface{}) {
 
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
-	for client, ip := range clients {
+	for client, cl := range clients {
 		err := client.WriteMessage(websocket.TextMessage, payload)
 		if err != nil {
-			log.Printf("error broadcasting to client %s: %v", ip, err)
+			log.Printf("error broadcasting to client %s: %v", cl.ID, err)
 			client.Close()
 			delete(clients, client)
 		}
@@ -205,21 +211,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	updateStatuses()
 
 	clientsMu.Lock()
-	clients[ws] = id
+	clients[ws] = &Client{ID: id, Joined: false}
 	clientsMu.Unlock()
 
-	// Send initial state
+	// Send initial state — do NOT send cipher chunk until this connection clicks Join
 	state.mu.Lock()
-	var cipherChunk string
-	if state.JoinedIDs[id] {
-		// If already joined and potentially unlocked, re-distribute or re-send cipher part
-		cipherChunk = getCipherForID(id)
-	}
-
 	initialPayload, _ := json.Marshal(map[string]interface{}{
 		"chunks":         state.Chunks,
 		"already_joined": state.JoinedIDs[id],
-		"cipher_chunk":   cipherChunk,
 	})
 	state.mu.Unlock()
 	ws.WriteMessage(websocket.TextMessage, initialPayload)
@@ -291,6 +290,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				state.IDToChunk[id] = firstOrange.ID
 				joinedCount := len(state.JoinedIDs)
 
+				// Mark this specific connection as joined
+				clientsMu.Lock()
+				if c, ok := clients[ws]; ok {
+					c.Joined = true
+				}
+				clientsMu.Unlock()
+
 				log.Printf("client joined: %s (chunk: %d, total joined: %d/%d)", id, firstOrange.ID, joinedCount, len(state.Chunks))
 
 				broadcast(map[string]interface{}{"chunks": state.Chunks})
@@ -331,8 +337,9 @@ func tickerLoop() {
 							delete(state.IDToChunk, id)
 							// Notify this specific client they can rejoin
 							clientsMu.Lock()
-							for client, clientID := range clients {
-								if clientID == id {
+							for client, cl := range clients {
+								if cl.ID == id {
+									cl.Joined = false
 									client.WriteJSON(map[string]bool{"can_rejoin": true})
 								}
 							}
@@ -359,6 +366,7 @@ func getCipherForID(id string) string {
 	for joinedID := range state.JoinedIDs {
 		joinedIDs = append(joinedIDs, joinedID)
 	}
+	sort.Strings(joinedIDs)
 
 	n := len(joinedIDs)
 	if n < minClients {
@@ -391,6 +399,7 @@ func distributeCipher() {
 	for id := range state.JoinedIDs {
 		joinedIDs = append(joinedIDs, id)
 	}
+	sort.Strings(joinedIDs)
 
 	n := len(joinedIDs)
 	if n == 0 {
@@ -405,7 +414,7 @@ func distributeCipher() {
 	cipherParts := splitText(encrypted, numCipherChunks)
 	keyParts := splitText(cipherKey, numKeyChunks)
 
-	// Send to clients
+	// Send only to connections that have explicitly joined
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
 
@@ -422,8 +431,8 @@ func distributeCipher() {
 			keyIdx++
 		}
 
-		for client, clientID := range clients {
-			if clientID == id {
+		for client, cl := range clients {
+			if cl.ID == id && cl.Joined {
 				log.Printf("distributing cipher to %s: %s", id, msg)
 				client.WriteJSON(map[string]string{"cipher_chunk": msg})
 			}
