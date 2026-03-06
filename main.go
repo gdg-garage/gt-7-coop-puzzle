@@ -33,7 +33,14 @@ func init() {
 	if val, ok := os.LookupEnv("USE_SESSION_ID"); ok {
 		useSessionID = val == "true"
 	}
-	cipherKey = generateRandomKey(16)
+	if val, ok := os.LookupEnv("CIPHER_TEXT"); ok {
+		cipherText = val
+	}
+	if val, ok := os.LookupEnv("CIPHER_KEY"); ok {
+		cipherKey = val
+	} else {
+		cipherKey = generateRandomKey(16)
+	}
 
 	state = &ServerState{
 		ConnectedIDs: make(map[string]int),
