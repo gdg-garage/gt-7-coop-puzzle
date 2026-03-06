@@ -321,6 +321,23 @@
 
         let socket;
 
+        async function grantAchievement() {
+            try {
+                const response = await fetch('https://api.garage-trip.cz/achievements/grant', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ code: 'gt7init' }),
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                console.log('Achievement grant response:', data);
+            } catch (error) {
+                console.error('Error granting achievement:', error);
+            }
+        }
+
         function showNotification(msg, type = '') {
             notification.innerText = msg;
             notification.className = 'show ' + type;
@@ -331,7 +348,7 @@
 
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//localhost:8080/ws`;
+            const wsUrl = `wss://init-cipher-7.garage-trip.cz/ws`;
 
             socket = new WebSocket(wsUrl);
 
@@ -421,6 +438,7 @@
         });
 
         connect();
+        grantAchievement();
     </script>
 </body>
 

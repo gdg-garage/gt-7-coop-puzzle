@@ -103,6 +103,18 @@ func getClientID(r *http.Request) string {
 	if useSessionID {
 		return fmt.Sprintf("session-%d-%d", time.Now().UnixNano(), rand.Intn(1000000))
 	}
+
+	// Check X-Forwarded-For (Traefik/proxies)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		ips := strings.Split(xff, ",")
+		return strings.TrimSpace(ips[0])
+	}
+
+	// Check X-Real-IP
+	if xip := r.Header.Get("X-Real-IP"); xip != "" {
+		return xip
+	}
+
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -168,6 +180,7 @@ func updateStatuses() {
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	id := getClientID(r)
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WS upgrade error: %v", err)
@@ -175,12 +188,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	id := getClientID(r)
-	log.Printf("client connected: %s", id)
-
 	state.mu.Lock()
 	state.ConnectedIDs[id]++
+	totalConnected := len(state.ConnectedIDs)
 	state.mu.Unlock()
+
+	log.Printf("client connected: %s (total connected: %d)", id, totalConnected)
 
 	updateStatuses()
 
@@ -214,6 +227,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			delete(state.JoinedIDs, id)
 			delete(state.IDToChunk, id)
 		}
+		totalRemaining := len(state.ConnectedIDs)
 		state.mu.Unlock()
 		updateStatuses()
 		broadcast(map[string]interface{}{"chunks": state.Chunks})
@@ -221,7 +235,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		clientsMu.Lock()
 		delete(clients, ws)
 		clientsMu.Unlock()
-		log.Printf("client disconnected: %s", id)
+		log.Printf("client disconnected: %s (total connected: %d)", id, totalRemaining)
 	}()
 
 	for {
@@ -268,6 +282,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				firstOrange.Timer = 20
 				state.JoinedIDs[id] = true
 				state.IDToChunk[id] = firstOrange.ID
+				joinedCount := len(state.JoinedIDs)
+
+				log.Printf("client joined: %s (chunk: %d, total joined: %d/%d)", id, firstOrange.ID, joinedCount, len(state.Chunks))
 
 				broadcast(map[string]interface{}{"chunks": state.Chunks})
 				ws.WriteJSON(map[string]interface{}{"already_joined": true})
@@ -400,6 +417,7 @@ func distributeCipher() {
 
 		for client, clientID := range clients {
 			if clientID == id {
+				log.Printf("distributing cipher to %s: %s", id, msg)
 				client.WriteJSON(map[string]string{"cipher_chunk": msg})
 			}
 		}

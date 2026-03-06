@@ -18,7 +18,6 @@ WORKDIR /app
 
 # Copy binary and static files from builder
 COPY --from=builder /app/server .
-COPY index.html .
 
 # Expose port 8080
 EXPOSE 8080
