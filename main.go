@@ -1,19 +1,20 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"math/rand"
-	"os"
-	"strconv"
 
 	"github.com/gorilla/websocket"
 )
@@ -24,6 +25,23 @@ var (
 	minClients   = 4
 	useSessionID = false
 )
+
+// imgState holds the email→image assignment and the round-robin counter.
+type imgState struct {
+	mu          sync.Mutex
+	emailToImg  map[string]int // email → 0-based image index
+	nextIdx     int            // next image index to hand out
+	images      []imgEntry
+}
+
+type imgEntry struct {
+	Data []byte
+	Ext  string
+}
+
+var imgSt = &imgState{
+	emailToImg: make(map[string]int),
+}
 
 func init() {
 	if val, ok := os.LookupEnv("MIN_CLIENTS"); ok {
@@ -52,6 +70,24 @@ func init() {
 	for i := 0; i < minClients; i++ {
 		state.Chunks[i] = Chunk{ID: i + 1, Status: "gray", Timer: 0}
 	}
+
+	// Load images from img/ directory in sorted order
+	matches, err := filepath.Glob("img/*")
+	if err != nil {
+		log.Printf("img glob error: %v", err)
+	}
+	sort.Strings(matches)
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("failed to read image %s: %v", path, err)
+			continue
+		}
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		imgSt.images = append(imgSt.images, imgEntry{Data: data, Ext: ext})
+		log.Printf("loaded image: %s", path)
+	}
+	log.Printf("total images loaded: %d", len(imgSt.images))
 }
 
 func generateRandomKey(length int) string {
@@ -468,11 +504,55 @@ func splitText(text string, parts int) []string {
 	return result
 }
 
+// handleImg handles POST /img?email=<email> or form field "email".
+// It returns JSON: { "order": <1-based int>, "image": "<base64>" }
+func handleImg(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read email from POST form body only
+	_ = r.ParseForm()
+	email := r.FormValue("email")
+	if email == "" {
+		http.Error(w, "email is required", http.StatusBadRequest)
+		return
+	}
+
+	imgSt.mu.Lock()
+	defer imgSt.mu.Unlock()
+
+	if len(imgSt.images) == 0 {
+		http.Error(w, "no images available", http.StatusInternalServerError)
+		return
+	}
+
+	idx, seen := imgSt.emailToImg[email]
+	if !seen {
+		idx = imgSt.nextIdx % len(imgSt.images)
+		imgSt.emailToImg[email] = idx
+		imgSt.nextIdx++
+		log.Printf("img: new email %q assigned image index %d", email, idx)
+	} else {
+		log.Printf("img: returning existing image index %d for email %q", idx, email)
+	}
+
+	entry := imgSt.images[idx]
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"order": idx + 1,
+		"image": base64.StdEncoding.EncodeToString(entry.Data),
+		"ext":   entry.Ext,
+	})
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	go tickerLoop()
 
 	http.HandleFunc("/ws", handleConnections)
+	http.HandleFunc("/img", handleImg)
 	http.Handle("/", http.FileServer(http.Dir(".")))
 
 	fmt.Println("Server started on :8080")
